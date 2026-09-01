@@ -18,7 +18,17 @@ Persistent
 ;   좌클릭 드래그      : 이미지(창) 이동
 ;   Ctrl+Alt+Up/Down  : 투명도 증가/감소
 ;   Ctrl+Alt+O        : 다른 지도 이미지로 교체
+;   Ctrl+Alt+R        : 참조점 기반 반자동 정렬 시작 (아래 참고)
 ;   Ctrl+Alt+Q        : 설정 저장 후 종료
+;
+; 참조점 기반 반자동 정렬 (Ctrl+Alt+R):
+;   지도 이미지와 Emme4 화면에서 같은 지점(예: 교차로) 2곳을 순서대로 클릭하면
+;   두 기준점 사이 거리 비율로 배율과 이동량을 자동 계산해 오버레이를 맞춰줍니다.
+;   1) 지도 이미지 위에서 기준점 1 클릭
+;   2) 지도 이미지 위에서 기준점 2 클릭 (기준점 1과 멀리 떨어진 지점일수록 정확)
+;   3) Emme4 화면에서 기준점 1과 동일한 지점 클릭
+;   4) Emme4 화면에서 기준점 2와 동일한 지점 클릭 -> 자동 정렬 후 클릭 통과 모드로 전환
+;   진행 중 Esc로 언제든 취소 가능
 ; =====================================================================
 
 CONFIG_FILE := A_ScriptDir "\MapOverlay.ini"
@@ -34,6 +44,14 @@ posX     := 100
 posY     := 100
 opacity  := 150      ; 0(완전 투명) ~ 255(불투명)
 editMode := true     ; 시작 시에는 위치/배율을 맞출 수 있도록 편집 모드로 시작
+
+; ---- 참조점 정렬(Calibration) 상태 ----
+; 0=대기, 1=이미지 기준점1 대기, 2=이미지 기준점2 대기, 3=화면 기준점1 대기, 4=화면 기준점2 대기
+calibState    := 0
+calibImgP1    := ""
+calibImgP2    := ""
+calibScreenP1 := ""
+calibScreenP2 := ""
 
 ; =====================================================================
 ; 시작 절차
@@ -87,7 +105,9 @@ CreateOverlay() {
 ; 편집 모드 <-> 클릭 통과 모드
 ; =====================================================================
 ToggleClickThrough(*) {
-    global editMode
+    global editMode, calibState
+    if (calibState != 0)
+        CancelCalibration()
     editMode := !editMode
     if (editMode)
         ApplyEditMode()
@@ -110,13 +130,37 @@ ApplyEditMode() {
 }
 
 ; =====================================================================
-; 드래그로 창 이동 (편집 모드에서만)
+; 드래그로 창 이동 (편집 모드에서만) / 정렬 모드에서는 이미지 기준점 캡처
 ; =====================================================================
 OnLButtonDown(wParam, lParam, msg, hwnd) {
-    global editMode, pic, mapGui
-    if (!editMode)
-        return
+    global editMode, pic, mapGui, calibState, calibImgP1, calibImgP2, scale
+
     if (hwnd != pic.Hwnd)
+        return
+
+    if (calibState = 1 || calibState = 2) {
+        ; lParam 하위 16비트=x, 상위 16비트=y (컨트롤 클라이언트 좌표)
+        cx := lParam & 0xFFFF
+        cy := (lParam >> 16) & 0xFFFF
+        ; 현재 배율을 반영해 "배율 1배 기준" 이미지 좌표로 환산 (기준점끼리는 서로 같은 좌표계여야 함)
+        baseX := cx / scale
+        baseY := cy / scale
+
+        if (calibState = 1) {
+            calibImgP1 := [baseX, baseY]
+            calibState := 2
+            ShowStatus("정렬 2/4: 지도 이미지에서 기준점 2를 클릭하세요 (기준점 1과 먼 지점일수록 정확)")
+        } else {
+            calibImgP2 := [baseX, baseY]
+            calibState := 3
+            editMode := false
+            ApplyClickThrough()
+            ShowStatus("정렬 3/4: Emme4 화면에서 기준점 1과 같은 지점을 클릭하세요")
+        }
+        return
+    }
+
+    if (!editMode)
         return
     PostMessage(0xA1, 2, , , "ahk_id " mapGui.Hwnd)   ; WM_NCLBUTTONDOWN + HTCAPTION
 }
@@ -174,7 +218,11 @@ AdjustOpacity(delta) {
 ^!o:: ChangeImage()
 
 ChangeImage(*) {
-    global editMode, imgPath, mapGui, posX, posY, scale, opacity
+    global editMode, imgPath, mapGui, posX, posY, scale, opacity, calibState
+    if (calibState != 0) {
+        ShowStatus("정렬 진행 중에는 이미지를 변경할 수 없습니다 (Esc로 취소 후 다시 시도)")
+        return
+    }
     if (!editMode) {
         ShowStatus("이미지 교체는 편집 모드에서만 가능합니다 (Ctrl+Alt+T)")
         return
@@ -194,6 +242,91 @@ ChangeImage(*) {
 
 SelectImage() {
     return FileSelect(1, , "지도 이미지 선택", "이미지 (*.png; *.jpg; *.jpeg; *.bmp; *.gif)")
+}
+
+; =====================================================================
+; 참조점 기반 반자동 정렬
+; =====================================================================
+^!r:: StartCalibration()
+~Esc:: CancelCalibration()
+
+StartCalibration(*) {
+    global editMode, calibState, calibImgP1, calibImgP2, calibScreenP1
+
+    editMode := true
+    ApplyEditMode()
+    calibImgP1 := "", calibImgP2 := "", calibScreenP1 := ""
+    calibState := 1
+    ShowStatus("정렬 1/4: 지도 이미지에서 기준점 1을 클릭하세요 (Esc: 취소)")
+}
+
+CancelCalibration(*) {
+    global calibState
+    if (calibState = 0)
+        return
+    calibState := 0
+    ShowStatus("정렬 취소됨 (Ctrl+Alt+T로 원하는 모드로 전환하세요)")
+}
+
+; 정렬 3/4, 4/4 단계에서는 오버레이가 클릭 통과 상태라 Emme4 화면의 클릭을
+; 오버레이가 직접 받을 수 없으므로, 전역 클릭 훅으로 좌표만 관찰한다.
+; ~ 접두사로 클릭 자체는 항상 Emme4로 그대로 전달됨(막지 않음).
+~LButton:: CaptureScreenPoint()
+
+CaptureScreenPoint(*) {
+    global calibState, calibScreenP1, calibScreenP2
+    if (calibState = 3) {
+        MouseGetPos(&mx, &my)
+        calibScreenP1 := [mx, my]
+        calibState := 4
+        ShowStatus("정렬 4/4: Emme4 화면에서 기준점 2와 같은 지점을 클릭하세요")
+    } else if (calibState = 4) {
+        MouseGetPos(&mx, &my)
+        calibScreenP2 := [mx, my]
+        calibState := 0
+        ApplyCalibration()
+    }
+}
+
+ApplyCalibration() {
+    global calibImgP1, calibImgP2, calibScreenP1, calibScreenP2
+    global mapGui, pic, baseW, baseH, scale, posX, posY, editMode
+
+    imgDx := calibImgP2[1] - calibImgP1[1]
+    imgDy := calibImgP2[2] - calibImgP1[2]
+    imgDist := Sqrt(imgDx ** 2 + imgDy ** 2)
+
+    if (imgDist < 2) {
+        ShowStatus("정렬 실패: 이미지 기준점 두 개가 너무 가깝습니다. Ctrl+Alt+R로 다시 시도하세요")
+        return
+    }
+
+    scrDx := calibScreenP2[1] - calibScreenP1[1]
+    scrDy := calibScreenP2[2] - calibScreenP1[2]
+    scrDist := Sqrt(scrDx ** 2 + scrDy ** 2)
+
+    newScale := scrDist / imgDist
+    if (newScale < 0.05)
+        newScale := 0.05
+    if (newScale > 10.0)
+        newScale := 10.0
+
+    ; 기준점1(이미지) -> 기준점1(화면)이 정확히 겹치도록 이동량 역산
+    tx := calibScreenP1[1] - newScale * calibImgP1[1]
+    ty := calibScreenP1[2] - newScale * calibImgP1[2]
+
+    scale := newScale
+    posX := Round(tx)
+    posY := Round(ty)
+
+    w := Round(baseW * scale)
+    h := Round(baseH * scale)
+    pic.Move(0, 0, w, h)
+    mapGui.Move(posX, posY, w, h)
+
+    editMode := false
+    ApplyClickThrough()
+    ShowStatus("정렬 완료: 배율 " Round(scale * 100) "%, Emme4 조작 가능")
 }
 
 ; =====================================================================
