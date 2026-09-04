@@ -10,16 +10,20 @@ Persistent
 ;   2. 처음 실행 시 지도 이미지 파일을 선택
 ;   3. Ctrl+Alt+T 로 "편집 모드"와 "클릭 통과(Emme4 조작) 모드"를 전환
 ;      - 클릭 통과 모드: 오버레이가 마우스/키보드 입력을 그대로 Emme4로 흘려보냄
-;      - 편집 모드     : 오버레이 이미지를 드래그로 이동, 휠로 확대/축소, 투명도 조절 가능
+;      - 편집 모드     : 오버레이 위에서 드래그로 이동, 방향키로 미세 이동,
+;                        Shift+휠로 커서 위치를 기준으로 확대/축소, 투명도 조절 가능
 ;
-; 단축키 (모두 편집 모드에서만 동작):
-;   Ctrl+Alt+T        : 편집 모드 <-> 클릭 통과 모드 전환
-;   Shift + 마우스휠  : 확대/축소
-;   좌클릭 드래그      : 이미지(창) 이동
-;   Ctrl+Alt+Up/Down  : 투명도 증가/감소
-;   Ctrl+Alt+O        : 다른 지도 이미지로 교체
+; 단축키 (표시/종료 관련은 언제나 동작, 나머지는 편집 모드에서만 동작):
+;   Ctrl+Alt+T        : 편집 모드 <-> 클릭 통과 모드 전환 (언제나 동작)
+;   Ctrl+Alt+H        : 오버레이 완전히 숨김 <-> 표시 전환 (언제나 동작)
+;   좌클릭 드래그      : 오버레이 위를 클릭한 채로 끌면 그 위치로 이동 (편집 모드)
+;   방향키            : 오버레이 1px 미세 이동 (편집 모드)
+;   Shift+방향키       : 오버레이 10px 이동 (편집 모드)
+;   Shift + 마우스휠  : 마우스 커서 위치를 기준으로 확대/축소 (편집 모드)
+;   Ctrl+Alt+Up/Down  : 투명도 증가/감소 (편집 모드)
+;   Ctrl+Alt+O        : 다른 지도 이미지로 교체 (편집 모드)
 ;   Ctrl+Alt+R        : 참조점 기반 반자동 정렬 시작 (아래 참고)
-;   Ctrl+Alt+Q        : 설정 저장 후 종료
+;   Ctrl+Alt+Q        : 설정 저장 후 종료 (언제나 동작)
 ;
 ; 참조점 기반 반자동 정렬 (Ctrl+Alt+R):
 ;   지도 이미지와 Emme4 화면에서 같은 지점(예: 교차로) 2곳을 순서대로 클릭하면
@@ -34,16 +38,17 @@ Persistent
 CONFIG_FILE := A_ScriptDir "\MapOverlay.ini"
 
 ; ---- 전역 상태 ----
-mapGui   := ""
-pic      := ""
-imgPath  := ""
-baseW    := 0
-baseH    := 0
-scale    := 1.0
-posX     := 100
-posY     := 100
-opacity  := 150      ; 0(완전 투명) ~ 255(불투명)
-editMode := true     ; 시작 시에는 위치/배율을 맞출 수 있도록 편집 모드로 시작
+mapGui         := ""
+pic            := ""
+imgPath        := ""
+baseW          := 0
+baseH          := 0
+scale          := 1.0
+posX           := 100
+posY           := 100
+opacity        := 150      ; 0(완전 투명) ~ 255(불투명)
+editMode       := true     ; 시작 시에는 위치/배율을 맞출 수 있도록 편집 모드로 시작
+overlayVisible := true
 
 ; ---- 참조점 정렬(Calibration) 상태 ----
 ; 0=대기, 1=이미지 기준점1 대기, 2=이미지 기준점2 대기, 3=화면 기준점1 대기, 4=화면 기준점2 대기
@@ -65,11 +70,10 @@ if (imgPath = "" || !FileExist(imgPath)) {
 }
 
 CreateOverlay()
-OnMessage(0x0201, OnLButtonDown)   ; WM_LBUTTONDOWN - 드래그 이동용
 OnExit(OnScriptExit)
 
 ApplyEditMode()
-ShowStatus("MapOverlay 시작 (Ctrl+Alt+T: 편집/클릭통과 전환, Ctrl+Alt+Q: 종료)")
+ShowStatus("MapOverlay 시작 (Ctrl+Alt+T: 편집/클릭통과, Ctrl+Alt+H: 숨김/표시, Ctrl+Alt+Q: 종료)")
 
 ; =====================================================================
 ; 오버레이 창 생성
@@ -102,6 +106,15 @@ CreateOverlay() {
 }
 
 ; =====================================================================
+; 오버레이 위에 좌표가 있는지 판정 (드래그/기준점 클릭 판정에 공통 사용)
+; =====================================================================
+IsOverOverlay(mx, my) {
+    global mapGui
+    mapGui.GetPos(&wx, &wy, &ww, &wh)
+    return (mx >= wx && mx < wx + ww && my >= wy && my < wy + wh)
+}
+
+; =====================================================================
 ; 편집 모드 <-> 클릭 통과 모드
 ; =====================================================================
 ToggleClickThrough(*) {
@@ -126,25 +139,48 @@ ApplyClickThrough() {
 ApplyEditMode() {
     global mapGui
     WinSetExStyle("-0x20", "ahk_id " mapGui.Hwnd)   ; 클릭을 오버레이가 다시 받음
-    ShowStatus("오버레이 편집 모드 (드래그 이동 / Shift+휠 확대축소 / Ctrl+Alt+Up,Down 투명도)")
+    ShowStatus("오버레이 편집 모드 (드래그/방향키 이동, Shift+휠 확대축소, Ctrl+Alt+Up/Down 투명도)")
 }
 
 ; =====================================================================
-; 드래그로 창 이동 (편집 모드에서만) / 정렬 모드에서는 이미지 기준점 캡처
+; 완전 숨김 <-> 표시 (전용 토글 단축키)
 ; =====================================================================
-OnLButtonDown(wParam, lParam, msg, hwnd) {
-    global editMode, pic, mapGui, calibState, calibImgP1, calibImgP2, scale
+^!h:: ToggleVisibility()
 
-    if (hwnd != pic.Hwnd)
-        return
+ToggleVisibility(*) {
+    global mapGui, overlayVisible, calibState
+    if (calibState != 0)
+        CancelCalibration()
+    overlayVisible := !overlayVisible
+    if (overlayVisible) {
+        mapGui.Show("NoActivate")
+        ShowStatus("오버레이 표시")
+    } else {
+        mapGui.Hide()
+        ShowStatus("오버레이 숨김 (Ctrl+Alt+H로 다시 표시)")
+    }
+}
 
+; =====================================================================
+; 좌클릭 처리: 드래그 이동 / 정렬 모드의 기준점 캡처
+; =====================================================================
+~LButton:: HandleLButton()
+
+HandleLButton(*) {
+    global editMode, calibState, calibImgP1, calibImgP2, calibScreenP1, calibScreenP2, scale, mapGui
+
+    MouseGetPos(&mx, &my)
+
+    ; --- 정렬 1/4, 2/4: 지도 이미지 위 기준점 클릭 ---
     if (calibState = 1 || calibState = 2) {
-        ; lParam 하위 16비트=x, 상위 16비트=y (컨트롤 클라이언트 좌표)
-        cx := lParam & 0xFFFF
-        cy := (lParam >> 16) & 0xFFFF
-        ; 현재 배율을 반영해 "배율 1배 기준" 이미지 좌표로 환산 (기준점끼리는 서로 같은 좌표계여야 함)
-        baseX := cx / scale
-        baseY := cy / scale
+        if (!IsOverOverlay(mx, my)) {
+            ShowStatus("지도 이미지 위를 클릭해주세요")
+            return
+        }
+        mapGui.GetPos(&wx, &wy)
+        ; 현재 배율을 반영해 "배율 1배 기준" 이미지 좌표로 환산 (기준점끼리 같은 좌표계여야 함)
+        baseX := (mx - wx) / scale
+        baseY := (my - wy) / scale
 
         if (calibState = 1) {
             calibImgP1 := [baseX, baseY]
@@ -160,36 +196,92 @@ OnLButtonDown(wParam, lParam, msg, hwnd) {
         return
     }
 
+    ; --- 정렬 3/4, 4/4: Emme4 화면 위 기준점 클릭 (클릭은 그대로 Emme4로도 전달됨) ---
+    if (calibState = 3) {
+        calibScreenP1 := [mx, my]
+        calibState := 4
+        ShowStatus("정렬 4/4: Emme4 화면에서 기준점 2와 같은 지점을 클릭하세요")
+        return
+    }
+    if (calibState = 4) {
+        calibScreenP2 := [mx, my]
+        calibState := 0
+        ApplyCalibration()
+        return
+    }
+
+    ; --- 일반 드래그 이동: 편집 모드이고, 오버레이 위에서 클릭했을 때만 ---
     if (!editMode)
         return
-    PostMessage(0xA1, 2, , , "ahk_id " mapGui.Hwnd)   ; WM_NCLBUTTONDOWN + HTCAPTION
+    if (!IsOverOverlay(mx, my))
+        return
+    DragOverlay(mx, my)
+}
+
+; 마우스를 누른 채 이동하는 동안 실시간으로 창 위치를 따라오게 하는 방식.
+; (이전 버전의 WM_NCLBUTTONDOWN 트릭보다 확실하게 동작함)
+DragOverlay(startMx, startMy) {
+    global mapGui
+    mapGui.GetPos(&startWx, &startWy)
+    while (GetKeyState("LButton", "P")) {
+        MouseGetPos(&curMx, &curMy)
+        mapGui.Move(startWx + (curMx - startMx), startWy + (curMy - startMy))
+        Sleep(10)
+    }
 }
 
 ; =====================================================================
-; 확대 / 축소 (Shift + 마우스 휠, 편집 모드에서만)
+; 방향키로 미세 이동 (편집 모드에서만 동작, 클릭 통과 모드에서는 화살표 키가
+; 평소처럼 Emme4로 그대로 전달됨)
+; =====================================================================
+~Up::    NudgeOverlay(0, -1)
+~Down::  NudgeOverlay(0, 1)
+~Left::  NudgeOverlay(-1, 0)
+~Right:: NudgeOverlay(1, 0)
+~+Up::    NudgeOverlay(0, -10)
+~+Down::  NudgeOverlay(0, 10)
+~+Left::  NudgeOverlay(-10, 0)
+~+Right:: NudgeOverlay(10, 0)
+
+NudgeOverlay(dx, dy) {
+    global editMode, mapGui
+    if (!editMode)
+        return
+    mapGui.GetPos(&wx, &wy)
+    mapGui.Move(wx + dx, wy + dy)
+}
+
+; =====================================================================
+; 확대 / 축소 (Shift + 마우스 휠, 커서 위치를 기준으로 배율 변경, 편집 모드에서만)
 ; =====================================================================
 ~+WheelUp:: ZoomStep(1)
 ~+WheelDown:: ZoomStep(-1)
 
 ZoomStep(direction) {
-    global editMode, scale
+    global editMode, scale, mapGui, pic, baseW, baseH
     if (!editMode)
         return
+
+    MouseGetPos(&mx, &my)
+    mapGui.GetPos(&wx, &wy)
+    ; 커서 아래 지점이 화면상 같은 자리에 남도록, 배율 변경 전 기준(배율 1) 좌표를 구해둔다
+    relX := (mx - wx) / scale
+    relY := (my - wy) / scale
+
     newScale := scale + (0.05 * direction)
     if (newScale < 0.1)
         newScale := 0.1
     if (newScale > 5.0)
         newScale := 5.0
     scale := newScale
-    ResizeOverlay()
-}
 
-ResizeOverlay() {
-    global mapGui, pic, baseW, baseH, scale
     w := Round(baseW * scale)
     h := Round(baseH * scale)
+    newWx := Round(mx - relX * scale)
+    newWy := Round(my - relY * scale)
+
     pic.Move(0, 0, w, h)
-    mapGui.Move(, , w, h)
+    mapGui.Move(newWx, newWy, w, h)
     ShowStatus("배율: " Round(scale * 100) "%")
 }
 
@@ -266,26 +358,6 @@ CancelCalibration(*) {
         return
     calibState := 0
     ShowStatus("정렬 취소됨 (Ctrl+Alt+T로 원하는 모드로 전환하세요)")
-}
-
-; 정렬 3/4, 4/4 단계에서는 오버레이가 클릭 통과 상태라 Emme4 화면의 클릭을
-; 오버레이가 직접 받을 수 없으므로, 전역 클릭 훅으로 좌표만 관찰한다.
-; ~ 접두사로 클릭 자체는 항상 Emme4로 그대로 전달됨(막지 않음).
-~LButton:: CaptureScreenPoint()
-
-CaptureScreenPoint(*) {
-    global calibState, calibScreenP1, calibScreenP2
-    if (calibState = 3) {
-        MouseGetPos(&mx, &my)
-        calibScreenP1 := [mx, my]
-        calibState := 4
-        ShowStatus("정렬 4/4: Emme4 화면에서 기준점 2와 같은 지점을 클릭하세요")
-    } else if (calibState = 4) {
-        MouseGetPos(&mx, &my)
-        calibScreenP2 := [mx, my]
-        calibState := 0
-        ApplyCalibration()
-    }
 }
 
 ApplyCalibration() {
