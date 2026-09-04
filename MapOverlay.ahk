@@ -49,6 +49,7 @@ posY           := 100
 opacity        := 150      ; 0(완전 투명) ~ 255(불투명)
 editMode       := true     ; 시작 시에는 위치/배율을 맞출 수 있도록 편집 모드로 시작
 overlayVisible := true
+overlayReady   := false    ; CreateOverlay() 완료 전에는 모든 단축키가 무시됨(안전장치)
 
 ; ---- 참조점 정렬(Calibration) 상태 ----
 ; 0=대기, 1=이미지 기준점1 대기, 2=이미지 기준점2 대기, 3=화면 기준점1 대기, 4=화면 기준점2 대기
@@ -70,6 +71,7 @@ if (imgPath = "" || !FileExist(imgPath)) {
 }
 
 CreateOverlay()
+overlayReady := true
 OnExit(OnScriptExit)
 
 ApplyEditMode()
@@ -118,7 +120,9 @@ IsOverOverlay(mx, my) {
 ; 편집 모드 <-> 클릭 통과 모드
 ; =====================================================================
 ToggleClickThrough(*) {
-    global editMode, calibState
+    global editMode, calibState, overlayReady
+    if (!overlayReady)
+        return
     if (calibState != 0)
         CancelCalibration()
     editMode := !editMode
@@ -148,7 +152,9 @@ ApplyEditMode() {
 ^!h:: ToggleVisibility()
 
 ToggleVisibility(*) {
-    global mapGui, overlayVisible, calibState
+    global mapGui, overlayVisible, calibState, overlayReady
+    if (!overlayReady)
+        return
     if (calibState != 0)
         CancelCalibration()
     overlayVisible := !overlayVisible
@@ -167,7 +173,9 @@ ToggleVisibility(*) {
 ~LButton:: HandleLButton()
 
 HandleLButton(*) {
-    global editMode, calibState, calibImgP1, calibImgP2, calibScreenP1, calibScreenP2, scale, mapGui
+    global editMode, calibState, calibImgP1, calibImgP2, calibScreenP1, calibScreenP2, scale, mapGui, overlayReady
+    if (!overlayReady)
+        return
 
     MouseGetPos(&mx, &my)
 
@@ -244,8 +252,8 @@ DragOverlay(startMx, startMy) {
 ~+Right:: NudgeOverlay(10, 0)
 
 NudgeOverlay(dx, dy) {
-    global editMode, mapGui
-    if (!editMode)
+    global editMode, mapGui, overlayReady
+    if (!overlayReady || !editMode)
         return
     mapGui.GetPos(&wx, &wy)
     mapGui.Move(wx + dx, wy + dy)
@@ -258,8 +266,8 @@ NudgeOverlay(dx, dy) {
 ~+WheelDown:: ZoomStep(-1)
 
 ZoomStep(direction) {
-    global editMode, scale, mapGui, pic, baseW, baseH
-    if (!editMode)
+    global editMode, scale, mapGui, pic, baseW, baseH, overlayReady
+    if (!overlayReady || !editMode)
         return
 
     MouseGetPos(&mx, &my)
@@ -292,8 +300,8 @@ ZoomStep(direction) {
 ^!Down:: AdjustOpacity(-15)
 
 AdjustOpacity(delta) {
-    global editMode, opacity, mapGui
-    if (!editMode)
+    global editMode, opacity, mapGui, overlayReady
+    if (!overlayReady || !editMode)
         return
     opacity += delta
     if (opacity < 20)
@@ -310,7 +318,9 @@ AdjustOpacity(delta) {
 ^!o:: ChangeImage()
 
 ChangeImage(*) {
-    global editMode, imgPath, mapGui, posX, posY, scale, opacity, calibState
+    global editMode, imgPath, mapGui, posX, posY, scale, opacity, calibState, overlayReady
+    if (!overlayReady)
+        return
     if (calibState != 0) {
         ShowStatus("정렬 진행 중에는 이미지를 변경할 수 없습니다 (Esc로 취소 후 다시 시도)")
         return
@@ -326,8 +336,10 @@ ChangeImage(*) {
     posX := x, posY := y
     imgPath := newPath
     scale := 1.0
+    overlayReady := false
     mapGui.Destroy()
     CreateOverlay()
+    overlayReady := true
     ApplyEditMode()
     ShowStatus("이미지 교체됨: " imgPath)
 }
@@ -343,7 +355,9 @@ SelectImage() {
 ~Esc:: CancelCalibration()
 
 StartCalibration(*) {
-    global editMode, calibState, calibImgP1, calibImgP2, calibScreenP1
+    global editMode, calibState, calibImgP1, calibImgP2, calibScreenP1, overlayReady
+    if (!overlayReady)
+        return
 
     editMode := true
     ApplyEditMode()
