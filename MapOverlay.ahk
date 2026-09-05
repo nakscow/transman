@@ -87,8 +87,9 @@ CreateOverlay() {
     mapGui.BackColor := "White"
 
     ; 화면 폭의 60%를 기준 폭으로 잡고, 이미지는 원본 비율을 유지하며 리사이즈됨
+    ; (h를 생략하면 GUI 기본 높이로 늘어나 비율이 깨지므로, "-1"로 비율 유지 자동계산을 명시해야 함)
     defaultW := Round(A_ScreenWidth * 0.6)
-    pic := mapGui.Add("Picture", "x0 y0 w" defaultW, imgPath)
+    pic := mapGui.Add("Picture", "x0 y0 w" defaultW " h-1", imgPath)
     pic.GetPos(&px, &py, &pw, &ph)
     baseW := pw
     baseH := ph
