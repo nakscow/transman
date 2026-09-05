@@ -16,7 +16,9 @@ Persistent
 ; 단축키 (표시/종료 관련은 언제나 동작, 나머지는 편집 모드에서만 동작):
 ;   Ctrl+Alt+T        : 편집 모드 <-> 클릭 통과 모드 전환 (언제나 동작)
 ;   Ctrl+Alt+H        : 오버레이 완전히 숨김 <-> 표시 전환 (언제나 동작)
-;   좌클릭 드래그      : 오버레이 위를 클릭한 채로 끌면 그 위치로 이동 (편집 모드)
+;   좌클릭 드래그      : 오버레이 몸통을 클릭한 채로 끌면 그 위치로 이동 (편집 모드)
+;   좌클릭 드래그(모서리) : 오버레이 모서리 근처를 클릭한 채로 끌면 비율을 유지하며
+;                        크기 조정 (편집 모드, 반대쪽 모서리가 고정된 채로 커지고 작아짐)
 ;   방향키            : 오버레이 1px 미세 이동 (편집 모드)
 ;   Shift+방향키       : 오버레이 10px 이동 (편집 모드)
 ;   Shift + 마우스휠  : 마우스 커서 위치를 기준으로 확대/축소 (편집 모드)
@@ -50,6 +52,7 @@ opacity        := 150      ; 0(완전 투명) ~ 255(불투명)
 editMode       := true     ; 시작 시에는 위치/배율을 맞출 수 있도록 편집 모드로 시작
 overlayVisible := true
 overlayReady   := false    ; CreateOverlay() 완료 전에는 모든 단축키가 무시됨(안전장치)
+EDGE_MARGIN    := 14       ; 모서리 크기조정으로 인식할 가장자리 폭(px)
 
 ; ---- 참조점 정렬(Calibration) 상태 ----
 ; 0=대기, 1=이미지 기준점1 대기, 2=이미지 기준점2 대기, 3=화면 기준점1 대기, 4=화면 기준점2 대기
@@ -219,12 +222,89 @@ HandleLButton(*) {
         return
     }
 
-    ; --- 일반 드래그 이동: 편집 모드이고, 오버레이 위에서 클릭했을 때만 ---
+    ; --- 일반 드래그 이동 / 모서리 크기조정: 편집 모드이고, 오버레이 위에서 클릭했을 때만 ---
     if (!editMode)
         return
     if (!IsOverOverlay(mx, my))
         return
-    DragOverlay(mx, my)
+
+    corner := GetResizeCorner(mx, my)
+    if (corner != "")
+        ResizeFromCorner(corner, mx, my)
+    else
+        DragOverlay(mx, my)
+}
+
+; 클릭 좌표가 오버레이의 어느 모서리(가장자리 EDGE_MARGIN px 이내)에 있는지 판정.
+; 모서리가 아니면 빈 문자열을 반환(=몸통 클릭, 이동으로 처리).
+GetResizeCorner(mx, my) {
+    global mapGui, EDGE_MARGIN
+    mapGui.GetPos(&wx, &wy, &ww, &wh)
+
+    nearLeft   := (mx - wx) <= EDGE_MARGIN
+    nearRight  := (wx + ww - mx) <= EDGE_MARGIN
+    nearTop    := (my - wy) <= EDGE_MARGIN
+    nearBottom := (wy + wh - my) <= EDGE_MARGIN
+
+    if (nearLeft && nearTop)
+        return "TL"
+    if (nearRight && nearTop)
+        return "TR"
+    if (nearLeft && nearBottom)
+        return "BL"
+    if (nearRight && nearBottom)
+        return "BR"
+    return ""
+}
+
+; 모서리를 누른 채 끄는 동안 반대쪽 모서리(anchor)를 고정점으로 삼아,
+; anchor로부터의 거리 비율만큼 배율을 바꿔 종횡비를 유지하며 크기 조정.
+ResizeFromCorner(corner, startMx, startMy) {
+    global mapGui, pic, baseW, baseH, scale
+
+    mapGui.GetPos(&wx, &wy, &ww, &wh)
+    startScale := scale
+
+    if (corner = "TL")
+        anchorX := wx + ww, anchorY := wy + wh
+    else if (corner = "TR")
+        anchorX := wx, anchorY := wy + wh
+    else if (corner = "BL")
+        anchorX := wx + ww, anchorY := wy
+    else ; "BR"
+        anchorX := wx, anchorY := wy
+
+    startDist := Sqrt((startMx - anchorX) ** 2 + (startMy - anchorY) ** 2)
+    if (startDist < 1)
+        startDist := 1
+
+    while (GetKeyState("LButton", "P")) {
+        MouseGetPos(&curMx, &curMy)
+        curDist := Sqrt((curMx - anchorX) ** 2 + (curMy - anchorY) ** 2)
+        newScale := startScale * (curDist / startDist)
+        if (newScale < 0.1)
+            newScale := 0.1
+        if (newScale > 5.0)
+            newScale := 5.0
+        scale := newScale
+
+        w := Round(baseW * scale)
+        h := Round(baseH * scale)
+
+        if (corner = "TL")
+            newWx := anchorX - w, newWy := anchorY - h
+        else if (corner = "TR")
+            newWx := anchorX, newWy := anchorY - h
+        else if (corner = "BL")
+            newWx := anchorX - w, newWy := anchorY
+        else ; "BR"
+            newWx := anchorX, newWy := anchorY
+
+        pic.Move(0, 0, w, h)
+        mapGui.Move(newWx, newWy, w, h)
+        Sleep(10)
+    }
+    ShowStatus("배율: " Round(scale * 100) "%")
 }
 
 ; 마우스를 누른 채 이동하는 동안 실시간으로 창 위치를 따라오게 하는 방식.
