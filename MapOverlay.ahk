@@ -523,27 +523,57 @@ OnScriptExit(*) {
     SaveSettings()
 }
 
+; 스크립트 폴더에 쓰기 권한이 없을 때(Program Files, 읽기전용/보호된 폴더 등) 대체할
+; 항상 쓰기 가능한 사용자별 폴더
+FallbackConfigFile() {
+    dir := A_AppData "\MapOverlay"
+    try DirCreate(dir)
+    return dir "\MapOverlay.ini"
+}
+
 LoadSettings() {
     global imgPath, scale, posX, posY, opacity, CONFIG_FILE
+
+    ; 이전 실행에서 스크립트 폴더에 쓰지 못해 대체 위치에 저장된 적이 있다면 그쪽을 사용
+    if (!FileExist(CONFIG_FILE)) {
+        altFile := FallbackConfigFile()
+        if (FileExist(altFile))
+            CONFIG_FILE := altFile
+    }
+
     if !FileExist(CONFIG_FILE)
         return
-    imgPath := IniRead(CONFIG_FILE, "Overlay", "ImagePath", "")
-    scale   := IniRead(CONFIG_FILE, "Overlay", "Scale", "1.0") + 0
-    posX    := IniRead(CONFIG_FILE, "Overlay", "PosX", "100") + 0
-    posY    := IniRead(CONFIG_FILE, "Overlay", "PosY", "100") + 0
-    opacity := IniRead(CONFIG_FILE, "Overlay", "Opacity", "150") + 0
+
+    try {
+        imgPath := IniRead(CONFIG_FILE, "Overlay", "ImagePath", "")
+        scale   := IniRead(CONFIG_FILE, "Overlay", "Scale", "1.0") + 0
+        posX    := IniRead(CONFIG_FILE, "Overlay", "PosX", "100") + 0
+        posY    := IniRead(CONFIG_FILE, "Overlay", "PosY", "100") + 0
+        opacity := IniRead(CONFIG_FILE, "Overlay", "Opacity", "150") + 0
+    }
 }
 
 SaveSettings() {
-    global imgPath, scale, mapGui, opacity, CONFIG_FILE
-    if (mapGui != "") {
-        mapGui.GetPos(&x, &y)
-        IniWrite(x, CONFIG_FILE, "Overlay", "PosX")
-        IniWrite(y, CONFIG_FILE, "Overlay", "PosY")
+    global imgPath, scale, mapGui, opacity, CONFIG_FILE, posX, posY
+
+    if (mapGui != "")
+        mapGui.GetPos(&posX, &posY)
+
+    try {
+        WriteAllSettings(CONFIG_FILE, posX, posY, imgPath, scale, opacity)
+    } catch {
+        ; 액세스 거부(오류 5) 등으로 실패하면 사용자 AppData 폴더로 대체 저장
+        CONFIG_FILE := FallbackConfigFile()
+        try WriteAllSettings(CONFIG_FILE, posX, posY, imgPath, scale, opacity)
     }
-    IniWrite(imgPath, CONFIG_FILE, "Overlay", "ImagePath")
-    IniWrite(scale, CONFIG_FILE, "Overlay", "Scale")
-    IniWrite(opacity, CONFIG_FILE, "Overlay", "Opacity")
+}
+
+WriteAllSettings(file, x, y, imgPath, scale, opacity) {
+    IniWrite(x, file, "Overlay", "PosX")
+    IniWrite(y, file, "Overlay", "PosY")
+    IniWrite(imgPath, file, "Overlay", "ImagePath")
+    IniWrite(scale, file, "Overlay", "Scale")
+    IniWrite(opacity, file, "Overlay", "Opacity")
 }
 
 ; =====================================================================
