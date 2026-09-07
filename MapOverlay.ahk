@@ -26,6 +26,11 @@ Persistent
 ;   Ctrl+Alt+Up/Down  : 투명도 증가/감소 (편집 모드)
 ;   Ctrl+Alt+O        : 다른 지도 이미지로 교체 (편집 모드)
 ;   Ctrl+Alt+R        : 참조점 기반 반자동 정렬 시작 (아래 참고)
+;   Ctrl+Alt+P        : 회전 기준점 지정 시작 (편집 모드로 자동 전환됨, 아래 참고)
+;   Ctrl+Alt+[ / ]    : 기준점 중심으로 1도씩 반시계/시계 방향 회전 (편집 모드)
+;   Ctrl+Alt+Shift+[ / ] : 기준점 중심으로 10도씩 회전 (편집 모드)
+;   Ctrl+Alt+0        : 회전 초기화(0도로 복귀) (편집 모드)
+;   Ctrl+Alt+L        : 오버레이 고정 <-> 고정 해제 (언제나 동작)
 ;   Ctrl+Alt+Q        : 설정 저장 후 종료 (언제나 동작)
 ;
 ; 참조점 기반 반자동 정렬 (Ctrl+Alt+R):
@@ -36,24 +41,44 @@ Persistent
 ;   3) Emme4 화면에서 기준점 1과 동일한 지점 클릭
 ;   4) Emme4 화면에서 기준점 2와 동일한 지점 클릭 -> 자동 정렬 후 클릭 통과 모드로 전환
 ;   진행 중 Esc로 언제든 취소 가능
+;
+; 회전 (Ctrl+Alt+P로 기준점 지정 후 Ctrl+Alt+[ / ]):
+;   1) 회전각이 0도인 상태에서 Ctrl+Alt+P -> 지도 이미지에서 회전축으로 삼을 지점 클릭
+;   2) Ctrl+Alt+[ / ] (또는 Shift 병행으로 10도씩)로 그 지점을 중심으로 회전
+;      회전 중에도 기준점은 화면상 같은 위치에 고정된 채로 지도만 돌아감
+;   3) Ctrl+Alt+0으로 언제든 회전을 초기화(0도)할 수 있음(기준점을 다시 지정하려면
+;      먼저 회전을 0도로 되돌려야 함)
+;   * GDI+로 매번 이미지를 다시 렌더링하는 방식이라 이미지가 클 경우 다소 느릴 수 있음
+;
+; 고정 (Ctrl+Alt+L):
+;   위치/배율/회전을 원하는 대로 맞춘 뒤 고정하면, 클릭 통과 모드로 강제 전환되고
+;   실수로 편집 모드에 들어가거나 이동/크기조정/회전이 되는 일을 막아줍니다.
+;   다시 Ctrl+Alt+L을 누르면 고정이 풀립니다.
 ; =====================================================================
 
 CONFIG_FILE := A_ScriptDir "\MapOverlay.ini"
+ROTATED_FILE := A_Temp "\MapOverlay_rotated.png"
 
 ; ---- 전역 상태 ----
 mapGui         := ""
 pic            := ""
-imgPath        := ""
-baseW          := 0
+sourceImgPath  := ""       ; 사용자가 선택한 회전 없는 원본 이미지(항상 이 파일에서 다시 렌더링)
+imgPath        := ""       ; 현재 Picture 컨트롤에 실제로 로드된 파일(원본 또는 회전 렌더링 결과)
+baseW          := 0        ; 현재 배율 1배 기준 표시 캔버스 크기(회전 반영됨)
 baseH          := 0
+origBaseW      := 0        ; 회전 계산의 기준이 되는, 회전 0도일 때의 원본 이미지 크기(고정)
+origBaseH      := 0
 scale          := 1.0
 posX           := 100
 posY           := 100
 opacity        := 150      ; 0(완전 투명) ~ 255(불투명)
+rotation       := 0.0      ; 현재 회전각(도, 시계방향 +)
 editMode       := true     ; 시작 시에는 위치/배율을 맞출 수 있도록 편집 모드로 시작
 overlayVisible := true
 overlayReady   := false    ; CreateOverlay() 완료 전에는 모든 단축키가 무시됨(안전장치)
+locked         := false    ; 고정 상태(위치/크기/회전 변경 금지)
 EDGE_MARGIN    := 22       ; 모서리/변 크기조정으로 인식할 가장자리 폭(px)
+gdipToken      := 0
 
 ; ---- 참조점 정렬(Calibration) 상태 ----
 ; 0=대기, 1=이미지 기준점1 대기, 2=이미지 기준점2 대기, 3=화면 기준점1 대기, 4=화면 기준점2 대기
@@ -63,15 +88,27 @@ calibImgP2    := ""
 calibScreenP1 := ""
 calibScreenP2 := ""
 
+; ---- 회전 기준점 지정 상태 ----
+pivotState := 0    ; 0=대기, 1=지도 이미지에서 클릭 대기
+pivotBaseX := ""   ; 회전 0도 기준 좌표계에서의 회전축 위치
+pivotBaseY := ""
+
+; ---- GDI+ 초기화 (회전 렌더링용, gdiplus.dll은 Windows에 기본 포함) ----
+si := Buffer(A_PtrSize = 8 ? 24 : 16, 0)
+NumPut("UInt", 1, si)
+DllCall("gdiplus\GdiplusStartup", "UPtr*", &gdipToken, "Ptr", si, "Ptr", 0)
+
 ; =====================================================================
 ; 시작 절차
 ; =====================================================================
 LoadSettings()
 
-if (imgPath = "" || !FileExist(imgPath)) {
-    imgPath := SelectImage()
-    if (imgPath = "")
+if (sourceImgPath = "" || !FileExist(sourceImgPath)) {
+    sourceImgPath := SelectImage()
+    if (sourceImgPath = "")
         ExitApp()
+    rotation := 0.0
+    pivotBaseX := "", pivotBaseY := ""
 }
 
 CreateOverlay()
@@ -79,24 +116,37 @@ overlayReady := true
 OnExit(OnScriptExit)
 
 ApplyEditMode()
-ShowStatus("MapOverlay 시작 (Ctrl+Alt+T: 편집/클릭통과, Ctrl+Alt+H: 숨김/표시, Ctrl+Alt+Q: 종료)")
+ShowStatus("MapOverlay 시작 (Ctrl+Alt+T: 편집/클릭통과, Ctrl+Alt+H: 숨김/표시, Ctrl+Alt+L: 고정, Ctrl+Alt+Q: 종료)")
 
 ; =====================================================================
 ; 오버레이 창 생성
 ; =====================================================================
 CreateOverlay() {
-    global mapGui, pic, imgPath, baseW, baseH, scale, posX, posY, opacity
+    global mapGui, pic, imgPath, sourceImgPath, baseW, baseH, origBaseW, origBaseH
+    global scale, posX, posY, opacity, rotation
 
     mapGui := Gui("+AlwaysOnTop -Caption +ToolWindow", "MapOverlay")
     mapGui.BackColor := "White"
 
+    ; 항상 "회전 0도" 상태의 원본 이미지 크기를 먼저 알아내 회전 계산의 기준으로 삼는다.
     ; 화면 폭의 60%를 기준 폭으로 잡고, 이미지는 원본 비율을 유지하며 리사이즈됨
     ; (h를 생략하면 GUI 기본 높이로 늘어나 비율이 깨지므로, "-1"로 비율 유지 자동계산을 명시해야 함)
     defaultW := Round(A_ScreenWidth * 0.6)
-    pic := mapGui.Add("Picture", "x0 y0 w" defaultW " h-1", imgPath)
-    pic.GetPos(&px, &py, &pw, &ph)
-    baseW := pw
-    baseH := ph
+    tmpPic := mapGui.Add("Picture", "x0 y0 w" defaultW " h-1 Hidden", sourceImgPath)
+    tmpPic.GetPos(&px, &py, &pw, &ph)
+    origBaseW := pw
+    origBaseH := ph
+    DllCall("DestroyWindow", "ptr", tmpPic.Hwnd)
+
+    ; 현재 회전각에 맞는 표시 캔버스 크기 계산(0도면 원본 크기와 동일)
+    if (Abs(rotation) < 0.001) {
+        baseW := origBaseW
+        baseH := origBaseH
+    } else {
+        ComputeRotatedCanvas(origBaseW, origBaseH, rotation, &cw, &ch)
+        baseW := Round(cw)
+        baseH := Round(ch)
+    }
 
     if (scale <= 0)
         scale := 1.0
@@ -106,8 +156,9 @@ CreateOverlay() {
     if (w < 20 || h < 20) {
         w := baseW, h := baseH, scale := 1.0
     }
-    if (w != pw || h != ph)
-        ReloadPicAtSize(w, h)
+
+    RegenerateDisplayImage()   ; imgPath를 원본 또는 회전 렌더링 결과로 확정
+    pic := mapGui.Add("Picture", "x0 y0 w" w " h" h, imgPath)
 
     mapGui.Show("x" posX " y" posY " w" w " h" h " NoActivate")
     WinSetTransparent(opacity, "ahk_id " mapGui.Hwnd)
@@ -125,6 +176,110 @@ ReloadPicAtSize(w, h) {
 }
 
 ; =====================================================================
+; 회전 관련 좌표 계산
+;
+; 회전은 항상 "회전 0도일 때의 원본 이미지"(origBaseW x origBaseH, 고정값)를
+; 기준으로 계산한다. 이렇게 하면 회전을 여러 번 반복해도 매번 원본에서 다시
+; 렌더링하므로 화질이 누적으로 열화되지 않고, 기준점 좌표도 항상 같은
+; 좌표계를 쓰면 되어 계산이 단순해진다.
+; =====================================================================
+
+; 원본 크기(w,h)를 angleDeg만큼 회전했을 때, 잘리지 않게 감싸는 사각형(캔버스) 크기
+ComputeRotatedCanvas(w, h, angleDeg, &outW, &outH) {
+    rad := angleDeg * 0.017453292519943295   ; * pi/180
+    cosA := Abs(Cos(rad)), sinA := Abs(Sin(rad))
+    outW := w * cosA + h * sinA
+    outH := w * sinA + h * cosA
+}
+
+; 원본 좌표계의 점(px,py)이 angleDeg 회전 후 새 캔버스 좌표계에서 어디로 가는지 계산
+MapPointRotated(px, py, w, h, angleDeg, &outX, &outY) {
+    rad := angleDeg * 0.017453292519943295
+    cosA := Cos(rad), sinA := Sin(rad)
+    dx := px - w / 2
+    dy := py - h / 2
+    rx := dx * cosA - dy * sinA
+    ry := dx * sinA + dy * cosA
+    ComputeRotatedCanvas(w, h, angleDeg, &cw, &ch)
+    outX := cw / 2 + rx
+    outY := ch / 2 + ry
+}
+
+; GDI+로 srcPath 이미지를 (logicalW x logicalH) 크기에 맞춰 angleDeg만큼 회전시키고,
+; 잘리지 않도록 확장된 캔버스에 그려 outPath(PNG)로 저장한다. 성공 시 true 반환.
+; 참고: 이 함수는 Win32 GDI+ API를 직접 호출하는 방식이라, 이 코드를 작성한 환경에서는
+; 실제 실행 검증을 하지 못했다. 문제가 있으면 오류 메시지를 알려주면 바로 고칠 수 있다.
+RenderRotatedImage(srcPath, logicalW, logicalH, angleDeg, outPath) {
+    PixelFormat32bppARGB := 0x26200A
+    MatrixOrderPrepend := 0
+
+    pSrc := 0, pCanvas := 0, pGraphics := 0
+    ok := false
+
+    try {
+        if (DllCall("gdiplus\GdipLoadImageFromFile", "wstr", srcPath, "ptr*", &pSrc) != 0)
+            throw Error("이미지 로드 실패")
+
+        ComputeRotatedCanvas(logicalW, logicalH, angleDeg, &canvasWf, &canvasHf)
+        canvasW := Max(1, Ceil(canvasWf))
+        canvasH := Max(1, Ceil(canvasHf))
+
+        if (DllCall("gdiplus\GdipCreateBitmapFromScan0", "int", canvasW, "int", canvasH, "int", 0, "int", PixelFormat32bppARGB, "ptr", 0, "ptr*", &pCanvas) != 0)
+            throw Error("캔버스 생성 실패")
+
+        if (DllCall("gdiplus\GdipGetImageGraphicsContext", "ptr", pCanvas, "ptr*", &pGraphics) != 0)
+            throw Error("그래픽 컨텍스트 생성 실패")
+
+        DllCall("gdiplus\GdipSetSmoothingMode", "ptr", pGraphics, "int", 4)          ; AntiAlias
+        DllCall("gdiplus\GdipSetInterpolationMode", "ptr", pGraphics, "int", 7)      ; HighQualityBicubic
+        DllCall("gdiplus\GdipSetPixelOffsetMode", "ptr", pGraphics, "int", 2)        ; HighQuality
+
+        ; 새 캔버스 중심으로 이동 -> 회전 -> 원본 이미지 중심이 원점에 오도록 이동
+        DllCall("gdiplus\GdipTranslateWorldTransform", "ptr", pGraphics, "float", canvasW / 2, "float", canvasH / 2, "int", MatrixOrderPrepend)
+        DllCall("gdiplus\GdipRotateWorldTransform", "ptr", pGraphics, "float", angleDeg, "int", MatrixOrderPrepend)
+        DllCall("gdiplus\GdipTranslateWorldTransform", "ptr", pGraphics, "float", -logicalW / 2, "float", -logicalH / 2, "int", MatrixOrderPrepend)
+
+        DllCall("gdiplus\GdipDrawImageRectI", "ptr", pGraphics, "ptr", pSrc, "int", 0, "int", 0, "int", Round(logicalW), "int", Round(logicalH))
+
+        clsid := Buffer(16, 0)
+        DllCall("ole32\CLSIDFromString", "wstr", "{557CF406-1A04-11D3-9A73-0000F81EF32E}", "ptr", clsid)   ; PNG 인코더(고정 CLSID)
+        if (DllCall("gdiplus\GdipSaveImageToFile", "ptr", pCanvas, "wstr", outPath, "ptr", clsid, "ptr", 0) != 0)
+            throw Error("파일 저장 실패")
+
+        ok := true
+    } catch {
+        ok := false
+    }
+
+    if (pGraphics)
+        DllCall("gdiplus\GdipDeleteGraphics", "ptr", pGraphics)
+    if (pCanvas)
+        DllCall("gdiplus\GdipDisposeImage", "ptr", pCanvas)
+    if (pSrc)
+        DllCall("gdiplus\GdipDisposeImage", "ptr", pSrc)
+
+    return ok
+}
+
+; rotation 값에 따라 imgPath를 원본(sourceImgPath) 또는 회전 렌더링 결과로 확정한다.
+RegenerateDisplayImage() {
+    global rotation, sourceImgPath, imgPath, origBaseW, origBaseH, ROTATED_FILE
+
+    if (Abs(rotation) < 0.001) {
+        imgPath := sourceImgPath
+        return
+    }
+
+    if (RenderRotatedImage(sourceImgPath, origBaseW, origBaseH, rotation, ROTATED_FILE))
+        imgPath := ROTATED_FILE
+    else {
+        ShowStatus("회전 렌더링 실패 - 회전 없이 표시합니다")
+        rotation := 0.0
+        imgPath := sourceImgPath
+    }
+}
+
+; =====================================================================
 ; 오버레이 위에 좌표가 있는지 판정 (드래그/기준점 클릭 판정에 공통 사용)
 ; =====================================================================
 IsOverOverlay(mx, my) {
@@ -137,11 +292,15 @@ IsOverOverlay(mx, my) {
 ; 편집 모드 <-> 클릭 통과 모드
 ; =====================================================================
 ToggleClickThrough(*) {
-    global editMode, calibState, overlayReady
+    global editMode, calibState, pivotState, overlayReady, locked
     if (!overlayReady)
         return
-    if (calibState != 0)
-        CancelCalibration()
+    if (locked) {
+        ShowStatus("오버레이가 고정되어 있습니다 (Ctrl+Alt+L로 고정 해제)")
+        return
+    }
+    if (calibState != 0 || pivotState != 0)
+        CancelPendingAction()
     editMode := !editMode
     if (editMode)
         ApplyEditMode()
@@ -169,11 +328,11 @@ ApplyEditMode() {
 ^!h:: ToggleVisibility()
 
 ToggleVisibility(*) {
-    global mapGui, overlayVisible, calibState, overlayReady
+    global mapGui, overlayVisible, calibState, pivotState, overlayReady
     if (!overlayReady)
         return
-    if (calibState != 0)
-        CancelCalibration()
+    if (calibState != 0 || pivotState != 0)
+        CancelPendingAction()
     overlayVisible := !overlayVisible
     if (overlayVisible) {
         mapGui.Show("NoActivate")
@@ -185,16 +344,54 @@ ToggleVisibility(*) {
 }
 
 ; =====================================================================
-; 좌클릭 처리: 드래그 이동 / 정렬 모드의 기준점 캡처
+; 고정 <-> 고정 해제
+; =====================================================================
+^!l:: ToggleLock()
+
+ToggleLock(*) {
+    global locked, editMode, calibState, pivotState, overlayReady
+    if (!overlayReady)
+        return
+    if (calibState != 0 || pivotState != 0)
+        CancelPendingAction()
+    locked := !locked
+    if (locked) {
+        if (editMode) {
+            editMode := false
+            ApplyClickThrough()
+        }
+        ShowStatus("오버레이 고정됨 (위치/크기/회전 변경 불가) - Ctrl+Alt+L로 고정 해제")
+    } else {
+        ShowStatus("오버레이 고정 해제됨 - Ctrl+Alt+T로 편집 가능")
+    }
+}
+
+; =====================================================================
+; 좌클릭 처리: 드래그 이동 / 정렬·회전기준점 모드의 기준점 캡처
 ; =====================================================================
 ~LButton:: HandleLButton()
 
 HandleLButton(*) {
-    global editMode, calibState, calibImgP1, calibImgP2, calibScreenP1, calibScreenP2, scale, mapGui, overlayReady
+    global editMode, calibState, calibImgP1, calibImgP2, calibScreenP1, calibScreenP2
+    global pivotState, pivotBaseX, pivotBaseY, scale, mapGui, overlayReady
     if (!overlayReady)
         return
 
     MouseGetPos(&mx, &my)
+
+    ; --- 회전 기준점 지정: 지도 이미지 위 클릭 ---
+    if (pivotState = 1) {
+        if (!IsOverOverlay(mx, my)) {
+            ShowStatus("지도 이미지 위를 클릭해주세요")
+            return
+        }
+        mapGui.GetPos(&wx, &wy)
+        pivotBaseX := (mx - wx) / scale
+        pivotBaseY := (my - wy) / scale
+        pivotState := 0
+        ShowStatus("회전 기준점 지정 완료 (Ctrl+Alt+[ / ] 로 회전)")
+        return
+    }
 
     ; --- 정렬 1/4, 2/4: 지도 이미지 위 기준점 클릭 ---
     if (calibState = 1 || calibState = 2) {
@@ -447,11 +644,12 @@ AdjustOpacity(delta) {
 ^!o:: ChangeImage()
 
 ChangeImage(*) {
-    global editMode, imgPath, mapGui, posX, posY, scale, opacity, calibState, overlayReady
+    global editMode, sourceImgPath, rotation, pivotBaseX, pivotBaseY, mapGui
+    global posX, posY, scale, opacity, calibState, pivotState, overlayReady
     if (!overlayReady)
         return
-    if (calibState != 0) {
-        ShowStatus("정렬 진행 중에는 이미지를 변경할 수 없습니다 (Esc로 취소 후 다시 시도)")
+    if (calibState != 0 || pivotState != 0) {
+        ShowStatus("정렬/회전 기준점 지정 중에는 이미지를 변경할 수 없습니다 (Esc로 취소 후 다시 시도)")
         return
     }
     if (!editMode) {
@@ -463,14 +661,16 @@ ChangeImage(*) {
         return
     mapGui.GetPos(&x, &y)
     posX := x, posY := y
-    imgPath := newPath
+    sourceImgPath := newPath
     scale := 1.0
+    rotation := 0.0
+    pivotBaseX := "", pivotBaseY := ""
     overlayReady := false
     mapGui.Destroy()
     CreateOverlay()
     overlayReady := true
     ApplyEditMode()
-    ShowStatus("이미지 교체됨: " imgPath)
+    ShowStatus("이미지 교체됨: " sourceImgPath)
 }
 
 SelectImage() {
@@ -481,12 +681,16 @@ SelectImage() {
 ; 참조점 기반 반자동 정렬
 ; =====================================================================
 ^!r:: StartCalibration()
-~Esc:: CancelCalibration()
+~Esc:: CancelPendingAction()
 
 StartCalibration(*) {
-    global editMode, calibState, calibImgP1, calibImgP2, calibScreenP1, overlayReady
+    global editMode, calibState, calibImgP1, calibImgP2, calibScreenP1, overlayReady, locked
     if (!overlayReady)
         return
+    if (locked) {
+        ShowStatus("오버레이가 고정되어 있습니다 (Ctrl+Alt+L로 고정 해제)")
+        return
+    }
 
     editMode := true
     ApplyEditMode()
@@ -495,12 +699,105 @@ StartCalibration(*) {
     ShowStatus("정렬 1/4: 지도 이미지에서 기준점 1을 클릭하세요 (Esc: 취소)")
 }
 
-CancelCalibration(*) {
-    global calibState
-    if (calibState = 0)
+CancelPendingAction(*) {
+    global calibState, pivotState
+    if (calibState != 0) {
+        calibState := 0
+        ShowStatus("정렬 취소됨 (Ctrl+Alt+T로 원하는 모드로 전환하세요)")
+    } else if (pivotState != 0) {
+        pivotState := 0
+        ShowStatus("회전 기준점 지정 취소됨")
+    }
+}
+
+; =====================================================================
+; 회전 (기준점 지정 + 회전)
+; =====================================================================
+^!p:: StartPivotPick()
+^![:: RotateStep(-1)
+^!]:: RotateStep(1)
+^!+[:: RotateStep(-10)
+^!+]:: RotateStep(10)
+^!0:: ResetRotation()
+
+StartPivotPick(*) {
+    global editMode, calibState, pivotState, rotation, overlayReady, locked
+    if (!overlayReady)
         return
-    calibState := 0
-    ShowStatus("정렬 취소됨 (Ctrl+Alt+T로 원하는 모드로 전환하세요)")
+    if (locked) {
+        ShowStatus("오버레이가 고정되어 있습니다 (Ctrl+Alt+L로 고정 해제)")
+        return
+    }
+    if (Abs(rotation) > 0.001) {
+        ShowStatus("회전 기준점은 회전각이 0도일 때만 지정할 수 있습니다. Ctrl+Alt+0으로 초기화하세요")
+        return
+    }
+    if (calibState != 0)
+        CancelPendingAction()
+
+    editMode := true
+    ApplyEditMode()
+    pivotState := 1
+    ShowStatus("지도 이미지에서 회전 기준점으로 쓸 지점을 클릭하세요 (Esc: 취소)")
+}
+
+; 기준점(pivotBaseX/Y)이 화면상 같은 위치에 고정된 채로 rotation을 deltaDeg만큼 바꾼다.
+RotateStep(deltaDeg) {
+    global rotation, locked, editMode, overlayReady, pivotBaseX, pivotBaseY
+    global mapGui, baseW, baseH, origBaseW, origBaseH, scale
+
+    if (!overlayReady || locked)
+        return
+    if (!editMode) {
+        ShowStatus("회전은 편집 모드에서만 가능합니다 (Ctrl+Alt+T)")
+        return
+    }
+    if (pivotBaseX = "") {
+        ShowStatus("먼저 Ctrl+Alt+P로 회전 기준점을 지정하세요")
+        return
+    }
+
+    oldAngle := rotation
+    newAngle := rotation + deltaDeg
+    while (newAngle > 180)
+        newAngle -= 360
+    while (newAngle <= -180)
+        newAngle += 360
+
+    ; 회전 전, 기준점이 현재 화면의 어느 위치에 있는지 구해 그 자리에 고정시킨다
+    mapGui.GetPos(&wx, &wy)
+    MapPointRotated(pivotBaseX, pivotBaseY, origBaseW, origBaseH, oldAngle, &oldPX, &oldPY)
+    screenPivotX := wx + oldPX * scale
+    screenPivotY := wy + oldPY * scale
+
+    rotation := newAngle
+    RegenerateDisplayImage()
+
+    ComputeRotatedCanvas(origBaseW, origBaseH, rotation, &cw, &ch)
+    baseW := Round(cw)
+    baseH := Round(ch)
+
+    MapPointRotated(pivotBaseX, pivotBaseY, origBaseW, origBaseH, rotation, &newPX, &newPY)
+    newWx := Round(screenPivotX - newPX * scale)
+    newWy := Round(screenPivotY - newPY * scale)
+
+    w := Round(baseW * scale)
+    h := Round(baseH * scale)
+    mapGui.Move(newWx, newWy, w, h)
+    ReloadPicAtSize(w, h)
+
+    ShowStatus("회전: " Round(rotation, 1) "도")
+}
+
+ResetRotation(*) {
+    global rotation, locked, overlayReady
+    if (!overlayReady || locked)
+        return
+    if (Abs(rotation) < 0.001) {
+        ShowStatus("이미 회전각이 0도입니다")
+        return
+    }
+    RotateStep(-rotation)
 }
 
 ApplyCalibration() {
@@ -550,7 +847,10 @@ ApplyCalibration() {
 ^!q:: ExitApp()
 
 OnScriptExit(*) {
+    global gdipToken
     SaveSettings()
+    if (gdipToken)
+        DllCall("gdiplus\GdiplusShutdown", "Ptr", gdipToken)
 }
 
 ; 스크립트 폴더에 쓰기 권한이 없을 때(Program Files, 읽기전용/보호된 폴더 등) 대체할
@@ -562,7 +862,7 @@ FallbackConfigFile() {
 }
 
 LoadSettings() {
-    global imgPath, scale, posX, posY, opacity, CONFIG_FILE
+    global sourceImgPath, scale, posX, posY, opacity, rotation, pivotBaseX, pivotBaseY, locked, CONFIG_FILE
 
     ; 이전 실행에서 스크립트 폴더에 쓰지 못해 대체 위치에 저장된 적이 있다면 그쪽을 사용
     if (!FileExist(CONFIG_FILE)) {
@@ -575,35 +875,47 @@ LoadSettings() {
         return
 
     try {
-        imgPath := IniRead(CONFIG_FILE, "Overlay", "ImagePath", "")
-        scale   := IniRead(CONFIG_FILE, "Overlay", "Scale", "1.0") + 0
-        posX    := IniRead(CONFIG_FILE, "Overlay", "PosX", "100") + 0
-        posY    := IniRead(CONFIG_FILE, "Overlay", "PosY", "100") + 0
-        opacity := IniRead(CONFIG_FILE, "Overlay", "Opacity", "150") + 0
+        sourceImgPath := IniRead(CONFIG_FILE, "Overlay", "ImagePath", "")
+        scale         := IniRead(CONFIG_FILE, "Overlay", "Scale", "1.0") + 0
+        posX          := IniRead(CONFIG_FILE, "Overlay", "PosX", "100") + 0
+        posY          := IniRead(CONFIG_FILE, "Overlay", "PosY", "100") + 0
+        opacity       := IniRead(CONFIG_FILE, "Overlay", "Opacity", "150") + 0
+        rotation      := IniRead(CONFIG_FILE, "Overlay", "Rotation", "0") + 0
+        locked        := IniRead(CONFIG_FILE, "Overlay", "Locked", "0") + 0 ? true : false
+
+        pivotXStr := IniRead(CONFIG_FILE, "Overlay", "PivotX", "")
+        pivotYStr := IniRead(CONFIG_FILE, "Overlay", "PivotY", "")
+        pivotBaseX := (pivotXStr = "") ? "" : pivotXStr + 0
+        pivotBaseY := (pivotYStr = "") ? "" : pivotYStr + 0
     }
 }
 
 SaveSettings() {
-    global imgPath, scale, mapGui, opacity, CONFIG_FILE, posX, posY
+    global sourceImgPath, scale, mapGui, opacity, rotation, pivotBaseX, pivotBaseY, locked
+    global CONFIG_FILE, posX, posY
 
     if (mapGui != "")
         mapGui.GetPos(&posX, &posY)
 
     try {
-        WriteAllSettings(CONFIG_FILE, posX, posY, imgPath, scale, opacity)
+        WriteAllSettings(CONFIG_FILE, posX, posY, sourceImgPath, scale, opacity, rotation, pivotBaseX, pivotBaseY, locked)
     } catch {
         ; 액세스 거부(오류 5) 등으로 실패하면 사용자 AppData 폴더로 대체 저장
         CONFIG_FILE := FallbackConfigFile()
-        try WriteAllSettings(CONFIG_FILE, posX, posY, imgPath, scale, opacity)
+        try WriteAllSettings(CONFIG_FILE, posX, posY, sourceImgPath, scale, opacity, rotation, pivotBaseX, pivotBaseY, locked)
     }
 }
 
-WriteAllSettings(file, x, y, imgPath, scale, opacity) {
+WriteAllSettings(file, x, y, imgPath, scale, opacity, rotation, pivotX, pivotY, locked) {
     IniWrite(x, file, "Overlay", "PosX")
     IniWrite(y, file, "Overlay", "PosY")
     IniWrite(imgPath, file, "Overlay", "ImagePath")
     IniWrite(scale, file, "Overlay", "Scale")
     IniWrite(opacity, file, "Overlay", "Opacity")
+    IniWrite(rotation, file, "Overlay", "Rotation")
+    IniWrite(pivotX = "" ? "" : pivotX, file, "Overlay", "PivotX")
+    IniWrite(pivotY = "" ? "" : pivotY, file, "Overlay", "PivotY")
+    IniWrite(locked ? 1 : 0, file, "Overlay", "Locked")
 }
 
 ; =====================================================================
