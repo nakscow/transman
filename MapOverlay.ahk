@@ -105,10 +105,20 @@ CreateOverlay() {
     if (w < 20 || h < 20) {
         w := baseW, h := baseH, scale := 1.0
     }
-    pic.Move(0, 0, w, h)
+    if (w != pw || h != ph)
+        ReloadPicAtSize(w, h)
 
     mapGui.Show("x" posX " y" posY " w" w " h" h " NoActivate")
     WinSetTransparent(opacity, "ahk_id " mapGui.Hwnd)
+}
+
+; Picture 컨트롤을 Move()로 리사이즈하면 기존 비트맵을 다시 그리지 않고 가장자리를
+; 늘려서 채우는 경우가 있어(확대 시 가장자리가 복제된 것처럼 보이는 현상), 배율이
+; 바뀔 때마다 컨트롤을 새로 만들어 이미지를 해당 크기로 다시 로드/렌더링한다.
+ReloadPicAtSize(w, h) {
+    global mapGui, pic, imgPath
+    pic.Destroy()
+    pic := mapGui.Add("Picture", "x0 y0 w" w " h" h, imgPath)
 }
 
 ; =====================================================================
@@ -278,6 +288,8 @@ ResizeFromCorner(corner, startMx, startMy) {
     if (startDist < 1)
         startDist := 1
 
+    finalW := ww
+    finalH := wh
     while (GetKeyState("LButton", "P")) {
         MouseGetPos(&curMx, &curMy)
         curDist := Sqrt((curMx - anchorX) ** 2 + (curMy - anchorY) ** 2)
@@ -290,6 +302,7 @@ ResizeFromCorner(corner, startMx, startMy) {
 
         w := Round(baseW * scale)
         h := Round(baseH * scale)
+        finalW := w, finalH := h
 
         if (corner = "TL")
             newWx := anchorX - w, newWy := anchorY - h
@@ -300,10 +313,13 @@ ResizeFromCorner(corner, startMx, startMy) {
         else ; "BR"
             newWx := anchorX, newWy := anchorY
 
+        ; 드래그 도중에는 빠른 미리보기로 컨트롤만 리사이즈(약간의 화질 열화는
+        ; 있을 수 있음). 마우스를 놓는 순간 아래에서 정확한 크기로 다시 로드한다.
         pic.Move(0, 0, w, h)
         mapGui.Move(newWx, newWy, w, h)
         Sleep(10)
     }
+    ReloadPicAtSize(finalW, finalH)
     ShowStatus("배율: " Round(scale * 100) "%")
 }
 
@@ -369,7 +385,7 @@ ZoomStep(direction) {
     newWx := Round(mx - relX * scale)
     newWy := Round(my - relY * scale)
 
-    pic.Move(0, 0, w, h)
+    ReloadPicAtSize(w, h)
     mapGui.Move(newWx, newWy, w, h)
     ShowStatus("배율: " Round(scale * 100) "%")
 }
@@ -488,7 +504,7 @@ ApplyCalibration() {
 
     w := Round(baseW * scale)
     h := Round(baseH * scale)
-    pic.Move(0, 0, w, h)
+    ReloadPicAtSize(w, h)
     mapGui.Move(posX, posY, w, h)
 
     editMode := false
