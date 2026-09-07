@@ -117,7 +117,9 @@ CreateOverlay() {
 ; 바뀔 때마다 컨트롤을 새로 만들어 이미지를 해당 크기로 다시 로드/렌더링한다.
 ReloadPicAtSize(w, h) {
     global mapGui, pic, imgPath
-    pic.Destroy()
+    ; GuiControl 객체에는 .Destroy() 메서드가 없으므로, 실제 자식 창을
+    ; DestroyWindow API로 직접 제거한 뒤 같은 자리에 새로 추가한다.
+    DllCall("DestroyWindow", "ptr", pic.Hwnd)
     pic := mapGui.Add("Picture", "x0 y0 w" w " h" h, imgPath)
 }
 
