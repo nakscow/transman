@@ -1,8 +1,10 @@
 import io
+import threading
 import time
 import warnings
 import xml.etree.ElementTree as ET
 import zipfile
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 import FinanceDataReader as fdr
@@ -22,6 +24,23 @@ API_KEY = "5ca518d43dabbb1941340da0ad37bfca7b721d6c"
 MAX_WORKERS = 3
 TIMEOUT = 20
 SLEEP_SEC = 0.12
+MAX_RETRIES = 3
+
+# OpenDart status 코드 중 특정 회사/분기에 국한된 문제가 아니라 API 키·요청 자체에
+# 문제가 생긴 "전역" 오류. 이 코드가 한 번이라도 뜨면 이후의 모든 호출도 똑같이
+# 실패하므로, 계속 호출을 이어가는 대신 즉시 중단하고 사유를 알려준다.
+#   010: 등록되지 않은 키          011: 사용할 수 없는 키
+#   012: 접근할 수 없는 IP         020: 요청 제한(사용한도) 초과
+#   101: 부적절한 접근             800: 시스템 점검 중
+#   900: 정의되지 않은 오류        901: 개인정보 보유기간 만료 키
+GLOBAL_ERROR_STATUS = {"010", "011", "012", "020", "101", "800", "900", "901"}
+
+# 스레드 간 공유: 전역 오류 발생 시 모든 워커에게 중단을 알리는 플래그,
+# 그리고 진단용으로 어떤 status 코드가 몇 번 나왔는지 집계
+stop_event = threading.Event()
+stop_reason = {}
+status_counter = Counter()
+status_lock = threading.Lock()
 
 NOW = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -155,9 +174,10 @@ session = requests.Session()
 
 
 def fetch_quarter(corp_code, year, report_code, fs_div):
-    time.sleep(SLEEP_SEC)
-    url = "https://opendart.fss.or.kr/api/fnlttSinglAcntAll.json"
+    if stop_event.is_set():
+        return None
 
+    url = "https://opendart.fss.or.kr/api/fnlttSinglAcntAll.json"
     params = {
         "crtfc_key": API_KEY,
         "corp_code": corp_code,
@@ -166,22 +186,42 @@ def fetch_quarter(corp_code, year, report_code, fs_div):
         "fs_div": fs_div,
     }
 
-    try:
-        r = session.get(
-            url, params=params, headers=HEADERS, timeout=TIMEOUT
-        )
-        data = r.json()
-
-        if data.get("status") != "000":
+    for attempt in range(MAX_RETRIES):
+        time.sleep(SLEEP_SEC)
+        try:
+            r = session.get(
+                url, params=params, headers=HEADERS, timeout=TIMEOUT
+            )
+            data = r.json()
+        except Exception:
+            # 네트워크 순단 등 일시적 오류 -> 잠깐 쉬었다가 재시도
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(2**attempt)
+                continue
             return None
 
-        df = pd.DataFrame(data.get("list", []))
-        if len(df) == 0:
+        status = data.get("status")
+
+        if status == "000":
+            df = pd.DataFrame(data.get("list", []))
+            return df if len(df) > 0 else None
+
+        with status_lock:
+            status_counter[status] += 1
+
+        if status in GLOBAL_ERROR_STATUS:
+            # 키 인증/사용한도 등 전역 오류 -> 재시도해도 계속 실패하므로
+            # 남은 모든 요청을 즉시 중단시킨다
+            if not stop_event.is_set():
+                stop_reason["status"] = status
+                stop_reason["message"] = data.get("message", "")
+                stop_event.set()
             return None
 
-        return df
-    except:
+        # "013"(해당 데이터 없음) 등은 정상적인 개별 케이스이므로 재시도하지 않는다
         return None
+
+    return None
 
 
 # =========================================================
@@ -224,6 +264,9 @@ def fetch_financial(row):
 
     try:
         for year, report_code, qname in TARGET_Q:
+            if stop_event.is_set():
+                break
+
             df = None
 
             # 연결(CFS) → 개별(OFS) 순으로 시도
@@ -330,6 +373,23 @@ def collect_all(df):
             except:
                 pass
 
+            # 전역 오류(사용한도 초과 등)가 감지되면, 아직 시작하지 않은
+            # 나머지 요청은 취소해 헛수고를 막는다(이미 실행 중인 요청은 계속됨)
+            if stop_event.is_set():
+                for f in futures:
+                    f.cancel()
+
+    if stop_event.is_set():
+        print()
+        print("!" * 60)
+        print(
+            f"OpenDart API 전역 오류(status={stop_reason.get('status')})로 "
+            "나머지 종목 수집을 중단했습니다."
+        )
+        print(f"메시지: {stop_reason.get('message')}")
+        print("이미 수집된 데이터만 저장합니다. (예: 사용한도 초과 시 내일 다시 시도)")
+        print("!" * 60)
+
     return pd.DataFrame(rows)
 
 
@@ -379,6 +439,8 @@ def main():
     df_fin = collect_all(df_stock)
     print()
     print(df_fin.shape)
+    if status_counter:
+        print("OpenDart 비정상 status 코드 집계 (진단용):", dict(status_counter))
     print()
 
     # 4. 종목 정보와 재무 데이터 데이터프레임 병합
