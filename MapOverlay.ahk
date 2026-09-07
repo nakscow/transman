@@ -17,8 +17,9 @@ Persistent
 ;   Ctrl+Alt+T        : 편집 모드 <-> 클릭 통과 모드 전환 (언제나 동작)
 ;   Ctrl+Alt+H        : 오버레이 완전히 숨김 <-> 표시 전환 (언제나 동작)
 ;   좌클릭 드래그      : 오버레이 몸통을 클릭한 채로 끌면 그 위치로 이동 (편집 모드)
-;   좌클릭 드래그(모서리) : 오버레이 모서리 근처를 클릭한 채로 끌면 비율을 유지하며
-;                        크기 조정 (편집 모드, 반대쪽 모서리가 고정된 채로 커지고 작아짐)
+;   좌클릭 드래그(가장자리) : 오버레이 모서리/변 근처(약 22px 이내, 상하좌우 어디든)를
+;                        클릭한 채로 끌면 비율을 유지하며 크기 조정 (편집 모드,
+;                        반대쪽 모서리/변이 고정된 채로 잡은 지점 방향으로 커지고 작아짐)
 ;   방향키            : 오버레이 1px 미세 이동 (편집 모드)
 ;   Shift+방향키       : 오버레이 10px 이동 (편집 모드)
 ;   Shift + 마우스휠  : 마우스 커서 위치를 기준으로 확대/축소 (편집 모드)
@@ -52,7 +53,7 @@ opacity        := 150      ; 0(완전 투명) ~ 255(불투명)
 editMode       := true     ; 시작 시에는 위치/배율을 맞출 수 있도록 편집 모드로 시작
 overlayVisible := true
 overlayReady   := false    ; CreateOverlay() 완료 전에는 모든 단축키가 무시됨(안전장치)
-EDGE_MARGIN    := 14       ; 모서리 크기조정으로 인식할 가장자리 폭(px)
+EDGE_MARGIN    := 22       ; 모서리/변 크기조정으로 인식할 가장자리 폭(px)
 
 ; ---- 참조점 정렬(Calibration) 상태 ----
 ; 0=대기, 1=이미지 기준점1 대기, 2=이미지 기준점2 대기, 3=화면 기준점1 대기, 4=화면 기준점2 대기
@@ -240,16 +241,17 @@ HandleLButton(*) {
     if (!IsOverOverlay(mx, my))
         return
 
-    corner := GetResizeCorner(mx, my)
-    if (corner != "")
-        ResizeFromCorner(corner, mx, my)
+    zone := GetResizeZone(mx, my)
+    if (zone != "")
+        ResizeFromZone(zone, mx, my)
     else
         DragOverlay(mx, my)
 }
 
-; 클릭 좌표가 오버레이의 어느 모서리(가장자리 EDGE_MARGIN px 이내)에 있는지 판정.
-; 모서리가 아니면 빈 문자열을 반환(=몸통 클릭, 이동으로 처리).
-GetResizeCorner(mx, my) {
+; 클릭 좌표가 오버레이의 어느 모서리/변(가장자리 EDGE_MARGIN px 이내)에 있는지 판정.
+; 모서리 4곳뿐 아니라 변(상/하/좌/우) 전체도 인식해서 크기조정 영역을 넓게 잡는다.
+; 아무 곳도 아니면 빈 문자열을 반환(=몸통 클릭, 이동으로 처리).
+GetResizeZone(mx, my) {
     global mapGui, EDGE_MARGIN
     mapGui.GetPos(&wx, &wy, &ww, &wh)
 
@@ -266,25 +268,46 @@ GetResizeCorner(mx, my) {
         return "BL"
     if (nearRight && nearBottom)
         return "BR"
+    if (nearTop)
+        return "T"
+    if (nearBottom)
+        return "B"
+    if (nearLeft)
+        return "L"
+    if (nearRight)
+        return "R"
     return ""
 }
 
-; 모서리를 누른 채 끄는 동안 반대쪽 모서리(anchor)를 고정점으로 삼아,
-; anchor로부터의 거리 비율만큼 배율을 바꿔 종횡비를 유지하며 크기 조정.
-ResizeFromCorner(corner, startMx, startMy) {
+; 모서리/변을 누른 채 끄는 동안 반대쪽(모서리는 반대쪽 모서리, 변은 반대쪽 변의
+; 가운데)을 고정점(anchor)으로 삼아, anchor로부터의 거리 비율만큼 배율을 바꿔
+; 종횡비를 유지하며 크기 조정한다. 항상 "지금 잡은 지점 -> 마우스 방향"으로
+; 자연스럽게 커지거나 작아지도록, 창(부모)을 먼저 옮긴 뒤 이미지(자식)를 맞춘다.
+ResizeFromZone(zone, startMx, startMy) {
     global mapGui, pic, baseW, baseH, scale
 
     mapGui.GetPos(&wx, &wy, &ww, &wh)
     startScale := scale
 
-    if (corner = "TL")
-        anchorX := wx + ww, anchorY := wy + wh
-    else if (corner = "TR")
-        anchorX := wx, anchorY := wy + wh
-    else if (corner = "BL")
-        anchorX := wx + ww, anchorY := wy
-    else ; "BR"
-        anchorX := wx, anchorY := wy
+    ; anchor: 크기가 바뀌어도 고정되어야 하는 기준점
+    ; hAlign/vAlign: 그 anchor가 새 사각형의 왼쪽/오른쪽/가운데, 위/아래/가운데 중
+    ; 어디에 해당하는지(고정된 쪽이 그대로 유지되도록 새 위치를 계산하기 위함)
+    if (zone = "TL")
+        anchorX := wx + ww, anchorY := wy + wh, hAlign := "right", vAlign := "bottom"
+    else if (zone = "TR")
+        anchorX := wx, anchorY := wy + wh, hAlign := "left", vAlign := "bottom"
+    else if (zone = "BL")
+        anchorX := wx + ww, anchorY := wy, hAlign := "right", vAlign := "top"
+    else if (zone = "BR")
+        anchorX := wx, anchorY := wy, hAlign := "left", vAlign := "top"
+    else if (zone = "T")
+        anchorX := wx + ww / 2, anchorY := wy + wh, hAlign := "center", vAlign := "bottom"
+    else if (zone = "B")
+        anchorX := wx + ww / 2, anchorY := wy, hAlign := "center", vAlign := "top"
+    else if (zone = "L")
+        anchorX := wx + ww, anchorY := wy + wh / 2, hAlign := "right", vAlign := "center"
+    else ; "R"
+        anchorX := wx, anchorY := wy + wh / 2, hAlign := "left", vAlign := "center"
 
     startDist := Sqrt((startMx - anchorX) ** 2 + (startMy - anchorY) ** 2)
     if (startDist < 1)
@@ -292,8 +315,15 @@ ResizeFromCorner(corner, startMx, startMy) {
 
     finalW := ww
     finalH := wh
+    lastMx := startMx, lastMy := startMy
     while (GetKeyState("LButton", "P")) {
         MouseGetPos(&curMx, &curMy)
+        if (curMx = lastMx && curMy = lastMy) {
+            Sleep(10)
+            continue
+        }
+        lastMx := curMx, lastMy := curMy
+
         curDist := Sqrt((curMx - anchorX) ** 2 + (curMy - anchorY) ** 2)
         newScale := startScale * (curDist / startDist)
         if (newScale < 0.1)
@@ -306,19 +336,15 @@ ResizeFromCorner(corner, startMx, startMy) {
         h := Round(baseH * scale)
         finalW := w, finalH := h
 
-        if (corner = "TL")
-            newWx := anchorX - w, newWy := anchorY - h
-        else if (corner = "TR")
-            newWx := anchorX, newWy := anchorY - h
-        else if (corner = "BL")
-            newWx := anchorX - w, newWy := anchorY
-        else ; "BR"
-            newWx := anchorX, newWy := anchorY
+        newWx := (hAlign = "left") ? anchorX : (hAlign = "right") ? anchorX - w : anchorX - w / 2
+        newWy := (vAlign = "top") ? anchorY : (vAlign = "bottom") ? anchorY - h : anchorY - h / 2
+        newWx := Round(newWx), newWy := Round(newWy)
 
-        ; 드래그 도중에는 빠른 미리보기로 컨트롤만 리사이즈(약간의 화질 열화는
-        ; 있을 수 있음). 마우스를 놓는 순간 아래에서 정확한 크기로 다시 로드한다.
-        pic.Move(0, 0, w, h)
+        ; 드래그 도중에는 빠른 미리보기: 창(부모)을 먼저 새 위치/크기로 옮긴 뒤
+        ; 이미지(자식 컨트롤)를 맞춰서, 자식이 아직 안 움직인 부모 경계에 잘려
+        ; 보이는 현상을 방지한다. 마우스를 놓는 순간 아래에서 정확한 크기로 다시 로드.
         mapGui.Move(newWx, newWy, w, h)
+        pic.Move(0, 0, w, h)
         Sleep(10)
     }
     ReloadPicAtSize(finalW, finalH)
@@ -330,9 +356,13 @@ ResizeFromCorner(corner, startMx, startMy) {
 DragOverlay(startMx, startMy) {
     global mapGui
     mapGui.GetPos(&startWx, &startWy)
+    lastMx := startMx, lastMy := startMy
     while (GetKeyState("LButton", "P")) {
         MouseGetPos(&curMx, &curMy)
-        mapGui.Move(startWx + (curMx - startMx), startWy + (curMy - startMy))
+        if (curMx != lastMx || curMy != lastMy) {
+            mapGui.Move(startWx + (curMx - startMx), startWy + (curMy - startMy))
+            lastMx := curMx, lastMy := curMy
+        }
         Sleep(10)
     }
 }
