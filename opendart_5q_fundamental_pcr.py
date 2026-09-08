@@ -113,9 +113,72 @@ def to_float(x):
 # =========================================================
 # 종목 리스트
 # =========================================================
+KRX_CACHE_LOOKBACK_DAYS = 10
+
+
+def fetch_krx_marcap_listing(market):
+    """FinanceDataReader가 참조하는 KRX 시가총액 캐시(GitHub raw CSV)를
+    직접 조회한다. fdr.StockListing()은 '최근 영업일' 날짜의 캐시 파일을
+    바로 찾는데, 장 마감 후 캐시가 생성되기 전(예: 당일 장중)에는 그 날짜의
+    파일이 아직 없어 404가 날 수 있다. 이를 대비해 최근 며칠을 거슬러
+    올라가며 실제로 존재하는 가장 최신 캐시 파일을 사용한다."""
+    mkt_map = {
+        "KRX-MARCAP": "ALL",
+        "KRX": "ALL",
+        "KOSPI": "STK",
+        "KOSDAQ": "KSQ",
+        "KONEX": "KNX",
+    }
+    if market not in mkt_map:
+        raise ValueError(f"market should be one of {list(mkt_map.keys())}")
+
+    today = datetime.now().date()
+    last_err = None
+
+    for i in range(KRX_CACHE_LOOKBACK_DAYS):
+        d = today - timedelta(days=i)
+        url = (
+            "https://raw.githubusercontent.com/FinanceData/fdr_krx_data_cache/"
+            f"refs/heads/master/data/listing/krx/{d.strftime('%Y-%m-%d')}.csv"
+        )
+        try:
+            df = pd.read_csv(
+                url,
+                index_col=0,
+                dtype={
+                    "Code": str,
+                    "Dept": str,
+                    "ChangeCode": str,
+                    "MarketId": str,
+                },
+            )
+        except Exception as e:
+            last_err = e
+            continue
+
+        df = df.reset_index(drop=True)
+        mkt = mkt_map[market]
+        if mkt != "ALL":
+            df = df[df["MarketId"] == mkt].reset_index(drop=True)
+        return df
+
+    raise RuntimeError(
+        f"최근 {KRX_CACHE_LOOKBACK_DAYS}일 내에서 KRX 시세 캐시 파일을 "
+        f"찾지 못했습니다 (market={market}): {last_err}"
+    )
+
+
 def get_stock_list():
-    kospi = fdr.StockListing("KOSPI")
-    kosdaq = fdr.StockListing("KOSDAQ")
+    try:
+        kospi = fdr.StockListing("KOSPI")
+        kosdaq = fdr.StockListing("KOSDAQ")
+    except Exception as e:
+        print(
+            f"fdr.StockListing() 조회 실패({e}). "
+            "최근 영업일 캐시로 재시도합니다."
+        )
+        kospi = fetch_krx_marcap_listing("KOSPI")
+        kosdaq = fetch_krx_marcap_listing("KOSDAQ")
 
     df = pd.concat([kospi, kosdaq], ignore_index=True)
 
