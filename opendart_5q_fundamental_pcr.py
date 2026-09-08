@@ -21,9 +21,12 @@ warnings.filterwarnings("ignore")
 
 API_KEY = "5ca518d43dabbb1941340da0ad37bfca7b721d6c"
 
-MAX_WORKERS = 3
+# 워커/슬립 값은 처리량과 직결된다. 지금처럼 전역 오류(사용한도 초과 등)를
+# 즉시 감지해 중단하는 안전장치가 있으므로, 값을 늘려도 위험 부담이 크지 않다.
+# (만약 status=020 등이 다시 자주 발생하면 이 값을 낮출 것)
+MAX_WORKERS = 12
 TIMEOUT = 20
-SLEEP_SEC = 0.12
+SLEEP_SEC = 0.03
 MAX_RETRIES = 3
 
 # OpenDart status 코드 중 특정 회사/분기에 국한된 문제가 아니라 API 키·요청 자체에
@@ -255,6 +258,13 @@ def get_corp_code_map():
 # OpenDart API 호출
 # =========================================================
 session = requests.Session()
+# requests의 기본 커넥션 풀 크기(10)는 MAX_WORKERS보다 작으면 스레드가
+# 커넥션을 기다리며 대기하게 되어 병목이 생긴다. MAX_WORKERS만큼 넉넉히 확보.
+_adapter = requests.adapters.HTTPAdapter(
+    pool_connections=MAX_WORKERS, pool_maxsize=MAX_WORKERS
+)
+session.mount("https://", _adapter)
+session.mount("http://", _adapter)
 
 
 def fetch_quarter(corp_code, year, report_code, fs_div):
