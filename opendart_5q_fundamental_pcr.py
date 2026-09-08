@@ -48,6 +48,9 @@ OUTPUT_FILE = f"OpenDart_5Q_Fundamental_with_PCR_{NOW}.csv"
 
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
+# 시가총액 300억원 미만 종목은 수집 대상에서 제외 (단위: 원)
+MIN_MARKET_CAP = 30_000_000_000
+
 # 보고서 종류별 법정 제출기한(분기말/사업연도말 기준 +45일, 사업보고서는 +90일).
 # 실제 제출은 기한 막판에 몰리는 경우가 많아 5일의 여유(BUFFER)를 더해,
 # 해당 시점 이후에는 대부분의 상장사가 공시를 마쳤다고 볼 수 있는 날짜를 기준으로 삼는다.
@@ -121,12 +124,30 @@ def get_stock_list():
         ~df["Name"].str.contains("우$|스팩|리츠", regex=True, na=False)
     ].copy()
 
+    # 시가총액: 단위 통일을 위해 '원' 단위 그대로 사용 (억원 환산 없음)
+    df["시가총액"] = pd.to_numeric(df["Marcap"], errors="coerce")
+
+    # 거래정지 종목 제외: 거래정지 상태인 종목은 당일 거래량(Volume)이
+    # 0으로 집계되므로 이를 거래정지 판별 기준으로 사용한다.
+    volume = pd.to_numeric(df["Volume"], errors="coerce").fillna(0)
+    is_halted = volume <= 0
+
+    # 시가총액 300억원 미만 종목 제외
+    is_below_min_cap = (
+        df["시가총액"].isna() | (df["시가총액"] < MIN_MARKET_CAP)
+    )
+
+    before = len(df)
+    df = df[~is_halted & ~is_below_min_cap].copy()
+    print(
+        f"거래정지/시가총액 {MIN_MARKET_CAP:,}원 미만 종목 제외: "
+        f"{before}개 -> {len(df)}개"
+    )
+
     out = pd.DataFrame()
     out["stock_code"] = df["Code"].astype(str).str.zfill(6)
     out["corp_name"] = df["Name"]
-
-    # 시가총액: 단위 통일을 위해 '원' 단위 그대로 사용 (억원 환산 없음)
-    out["시가총액"] = pd.to_numeric(df["Marcap"], errors="coerce")
+    out["시가총액"] = df["시가총액"]
 
     return out
 
@@ -468,11 +489,22 @@ def main():
                 np.nan,
             )
 
+    # 6. 결측치(NaN) 처리
+    # OpenDart에 해당 계정이 없거나 조회되지 않아 비어 있는 재무 지표는
+    # 종목/시가총액 등 식별 정보를 제외하고 0으로 채운다.
+    print("=" * 60)
+    print("결측치(NaN) -> 0 채우기")
+    print("=" * 60)
+    id_cols = ["stock_code", "corp_name", "시가총액", "corp_code"]
+    metric_cols = [c for c in df_final.columns if c not in id_cols]
+    df_final[metric_cols] = df_final[metric_cols].fillna(0)
+    print()
+
     print(df_final.shape)
     print(df_final.head())
     print()
 
-    # 6. CSV 저장
+    # 7. CSV 저장
     print("=" * 60)
     print("최종 파일 저장")
     print("=" * 60)
